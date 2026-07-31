@@ -33,10 +33,10 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Stage 2b - Install Required Dependencies (Selenium, Appium, OpenPyXL, Requests, Locust)
+      - name: Stage 2b - Install Required Dependencies from requirements.txt
         run: |
           python -m pip install --upgrade pip
-          pip install selenium Appium-Python-Client pandas openpyxl requests urllib3 locust
+          pip install -r requirements.txt
 
       # Stage 3: Setup Flutter SDK & Build Target Application
       - name: Stage 3a - Setup Flutter SDK
