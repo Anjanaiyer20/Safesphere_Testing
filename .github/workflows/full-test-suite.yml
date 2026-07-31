@@ -43,7 +43,6 @@ jobs:
       - name: Stage 3a - Setup Flutter SDK
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.x'
           channel: 'stable'
           cache: true
 
