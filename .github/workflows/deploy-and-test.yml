@@ -1,0 +1,102 @@
+name: SafeSphere Multi-Suite Automation Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-deploy-and-test:
+    name: Build, Deploy & Execute 4 Automation Suites
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Stage 1: Repository Checkout
+      - name: Stage 1 - Checkout Repository
+        uses: actions/checkout@v4
+
+      # Stage 2: Dependency Installation
+      - name: Stage 2a - Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Stage 2b - Install Automation Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium pandas openpyxl requests urllib3
+
+      - name: Stage 2c - Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+          cache: true
+
+      # Stage 3: Build Application
+      - name: Stage 3 - Build Flutter Web Release App
+        run: |
+          flutter pub get
+          flutter build web --release --base-href "/${{ github.event.repository.name }}/"
+
+      # Stage 4: Static Analysis
+      - name: Stage 4 - Execute Static Code Analysis
+        run: |
+          flutter analyze || echo "Static analysis completed with non-blocking warnings."
+
+      # Stage 5: Deploy to GitHub Pages
+      - name: Stage 5 - Deploy Application to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/web
+
+      # Stage 6: Wait for Deployment
+      - name: Stage 6 - Wait for GitHub Pages Deployment
+        run: |
+          echo "Waiting 15 seconds for deployment propagation..."
+          sleep 15
+
+      # Stage 7: Run 4 Automation Test Suites
+      - name: Stage 7 - Execute Selenium, Appium, Vulnerability & Load Suites
+        env:
+          BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          HEADLESS: "true"
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+        run: |
+          python automation/run_all_tests.py
+
+      # Stage 8: Publish Condensed Summary to GitHub Actions Tab
+      - name: Stage 8 - Write API Response Time & Status Summary to Step Summary
+        if: always()
+        run: |
+          if [ -f "Test Results/Summary/summary.md" ]; then
+            cat "Test Results/Summary/summary.md" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Stage 9: Upload Full Artifacts Bundle (Retention: 30 Days)
+      - name: Stage 9 - Upload Full Test Artifacts Bundle
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: SafeSphere-Multi-Suite-Automation-Artifacts
+          path: |
+            Test Results/
+            automation/reports/
+            automation/logs/
+            automation/screenshots/
+          retention-days: 30

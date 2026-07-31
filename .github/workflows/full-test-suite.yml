@@ -1,0 +1,101 @@
+name: Full 4-Suite Automated Testing Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "testing-pipeline"
+  cancel-in-progress: true
+
+jobs:
+  execute-full-test-suite:
+    name: Execute Full 4-Suite Automation & Summary Pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+      # Stage 1: Checkout Repository
+      - name: Stage 1 - Checkout Repository
+        uses: actions/checkout@v4
+
+      # Stage 2: Install Python & Automation Dependencies
+      - name: Stage 2a - Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Stage 2b - Install Required Dependencies (Selenium, Appium Client, OpenPyXL, Requests)
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium Appium-Python-Client pandas openpyxl requests urllib3 locust
+
+      - name: Stage 2c - Setup Node.js & Security Audit Tools
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Stage 2d - Install Security & Load Testing Tools
+        run: |
+          npm install -g npm@latest
+          sudo apt-get update && sudo apt-get install -y wget curl
+
+      # Stage 3: Setup Flutter SDK & Build Target Application
+      - name: Stage 3a - Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.x'
+          channel: 'stable'
+          cache: true
+
+      - name: Stage 3b - Build Flutter Web Release
+        run: |
+          flutter pub get
+          flutter build web --release --base-href "/${{ github.event.repository.name }}/"
+
+      # Stage 4: Deploy Application to GitHub Pages (Target for E2E Tests)
+      - name: Stage 4 - Deploy Application to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/web
+
+      # Stage 5: Execute All Four Test Suites (Selenium, Appium, Backend Vulnerability, Load Testing)
+      - name: Stage 5 - Execute All 4 Test Suites (1,400 Executable Test Cases)
+        env:
+          BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          HEADLESS: "true"
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD }}
+        run: |
+          python automation/run_all_tests.py
+
+      # Stage 6: Write Summary Tables Directly to $GITHUB_STEP_SUMMARY
+      - name: Stage 6 - Publish API Response Time & Status Summary to Step Summary
+        if: always()
+        run: |
+          if [ -f "Test Results/Summary/summary.md" ]; then
+            cat "Test Results/Summary/summary.md" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # Stage 7: Upload Full Detailed Report (Excel / HTML / Screenshots) as Build Artifact
+      - name: Stage 7 - Upload Full Detailed Test Artifacts Bundle
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: SafeSphere-Full-Test-Suite-Artifacts
+          path: |
+            Test Results/
+            automation/reports/
+            automation/logs/
+            automation/screenshots/
+          retention-days: 30

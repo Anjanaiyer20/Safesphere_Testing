@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'api_service_impl.dart' show RoutingEngine;
 
 class ApiService {
   static const String baseUrl = 'https://safesphere-backend-l14i.onrender.com';
@@ -406,8 +407,9 @@ class ApiService {
     double startLat,
     double startLng,
     double endLat,
-    double endLng,
-  ) async {
+    double endLng, {
+    RoutingEngine engine = RoutingEngine.auto,
+  }) async {
     try {
       final headers = await _authHeaders();
       final response = await http

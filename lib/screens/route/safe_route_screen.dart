@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'dart:async';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import '../../services/api_service_impl.dart';
 import '../../theme/app_theme.dart';
 import '../../widgets/route_map_widget.dart';
+import '../../widgets/route_feedback_dialog.dart';
 
 class SafeRouteScreen extends StatefulWidget {
   const SafeRouteScreen({super.key});
@@ -14,6 +17,7 @@ class SafeRouteScreen extends StatefulWidget {
 }
 
 class _SafeRouteScreenState extends State<SafeRouteScreen> {
+  final _startController = TextEditingController();
   final _destinationController = TextEditingController();
   bool _isLoading = false;
   bool _isLocationLoading = true;
@@ -29,14 +33,22 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
   List<Map<String, dynamic>> _remoteSuggestions = [];
   bool _isSearching = false;
   Timer? _searchDebounce;
+  final RoutingEngine _selectedEngine = RoutingEngine.osrm;
+  int _selectedRouteOptionIndex = 0;
 
   final List<Map<String, dynamic>> _suggestions = [
+    {'name': 'Thandalam', 'lat': 13.0169, 'lng': 80.0054},
+    {'name': 'Poonamallee', 'lat': 13.0492, 'lng': 80.1011},
+    {'name': 'Sriperumbudur', 'lat': 12.9675, 'lng': 79.9419},
+    {'name': 'Porur', 'lat': 13.0382, 'lng': 80.1565},
+    {'name': 'Guindy', 'lat': 13.0067, 'lng': 80.2206},
+    {'name': 'Velachery', 'lat': 12.9759, 'lng': 80.2212},
+    {'name': 'Chromepet', 'lat': 12.9516, 'lng': 80.1462},
+    {'name': 'Tambaram', 'lat': 12.9249, 'lng': 80.1000},
+    {'name': 'T. Nagar', 'lat': 13.0418, 'lng': 80.2341},
     {'name': 'Gandhipuram', 'lat': 11.0168, 'lng': 76.9558},
     {'name': 'RS Puram', 'lat': 11.0048, 'lng': 76.9603},
     {'name': 'Peelamedu', 'lat': 11.0247, 'lng': 77.0229},
-    {'name': 'Saibaba Colony', 'lat': 11.0209, 'lng': 76.9629},
-    {'name': 'Singanallur', 'lat': 10.9930, 'lng': 77.0156},
-    {'name': 'Ukkadam', 'lat': 10.9905, 'lng': 76.9695},
   ];
 
   @override
@@ -47,6 +59,7 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
 
   @override
   void dispose() {
+    _startController.dispose();
     _destinationController.dispose();
     _searchDebounce?.cancel();
     super.dispose();
@@ -55,56 +68,190 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
   // ── Location ──────────────────────────────────────────────────────────────
 
   Future<void> _getCurrentLocation() async {
+    if (!mounted) return;
     setState(() => _isLocationLoading = true);
+
     try {
-      var perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied) {
-        perm = await Geolocator.requestPermission();
-      }
-      if (perm == LocationPermission.deniedForever) {
-        _setDefaultLocation();
-        return;
+      LocationPermission permission = await Geolocator.checkPermission().catchError((_) => LocationPermission.denied);
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission().catchError((_) => LocationPermission.denied);
       }
 
-      final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+        final position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.medium,
+          timeLimit: const Duration(seconds: 4),
+        ).catchError((_) => null);
 
-      final locResponse = await ApiService.updateLocation(
-        position.latitude,
-        position.longitude,
-      );
+        if (position != null) {
+          final reverseName = await ApiService.reverseGeocode(
+            position.latitude,
+            position.longitude,
+          );
+          if (mounted) {
+            setState(() {
+              _currentLat = position.latitude;
+              _currentLng = position.longitude;
+              _currentPlaceName = reverseName;
+              _startController.text = reverseName;
+              _isLocationLoading = false;
+            });
+          }
+          return;
+        }
+      }
+    } catch (_) {}
 
+    // Fast IP Geolocation Cascade if native GPS permission denied or unavailable
+    await _fetchIpLocation();
+  }
+
+  Future<void> _fetchIpLocation() async {
+    // 1. Try ipwho.is (HTTPS, fast, unthrottled)
+    try {
+      final res = await http
+          .get(Uri.parse('https://ipwho.is/'))
+          .timeout(const Duration(seconds: 3));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        if (data['success'] == true) {
+          final lat = (data['latitude'] as num?)?.toDouble();
+          final lng = (data['longitude'] as num?)?.toDouble();
+          if (lat != null && lng != null) {
+            final reverseName = await ApiService.reverseGeocode(lat, lng);
+            if (mounted) {
+              setState(() {
+                _currentLat = lat;
+                _currentLng = lng;
+                _currentPlaceName = reverseName;
+                _startController.text = reverseName;
+                _isLocationLoading = false;
+              });
+            }
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 2. Fallback to ipinfo.io (HTTPS)
+    try {
+      final res = await http
+          .get(Uri.parse('https://ipinfo.io/json'))
+          .timeout(const Duration(seconds: 3));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final loc = data['loc']?.toString();
+        if (loc != null && loc.contains(',')) {
+          final parts = loc.split(',');
+          final lat = double.tryParse(parts[0].trim());
+          final lng = double.tryParse(parts[1].trim());
+          if (lat != null && lng != null) {
+            final reverseName = await ApiService.reverseGeocode(lat, lng);
+            if (mounted) {
+              setState(() {
+                _currentLat = lat;
+                _currentLng = lng;
+                _currentPlaceName = reverseName;
+                _startController.text = reverseName;
+                _isLocationLoading = false;
+              });
+            }
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+
+    _setDefaultLocation();
+  }
+
+  void _setDefaultLocation() async {
+    if (!mounted) return;
+    const defaultLat = 13.0827; // Chennai
+    const defaultLng = 80.2707;
+    final reverseName = await ApiService.reverseGeocode(defaultLat, defaultLng);
+    if (mounted) {
       setState(() {
-        _currentLat = position.latitude;
-        _currentLng = position.longitude;
-        _currentPlaceName =
-            locResponse['location']?['place_name'] ?? 'Your current location';
+        _currentLat = defaultLat;
+        _currentLng = defaultLng;
+        _currentPlaceName = reverseName;
+        _startController.text = reverseName;
         _isLocationLoading = false;
       });
-    } catch (_) {
-      _setDefaultLocation();
     }
   }
 
-  void _setDefaultLocation() {
-    setState(() {
-      _currentLat = 11.0168;
-      _currentLng = 76.9558;
-      _currentPlaceName = 'Coimbatore (default)';
-      _isLocationLoading = false;
-    });
+  void _showChangeStartDialog() {
+    final startCtrl = TextEditingController(text: _startController.text);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.card,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Change Starting Point', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: startCtrl,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'Enter start city or address...',
+            hintStyle: TextStyle(color: Colors.white54),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final query = startCtrl.text.trim();
+              if (query.isNotEmpty) {
+                Navigator.pop(ctx);
+                setState(() => _isLocationLoading = true);
+                try {
+                  final results = await ApiService.geocode(query);
+                  if (results.isNotEmpty) {
+                    final top = results.first;
+                    final lat = double.tryParse(top['lat'].toString());
+                    final lon = double.tryParse(top['lon'].toString());
+                    if (lat != null && lon != null) {
+                      setState(() {
+                        _currentLat = lat;
+                        _currentLng = lon;
+                        _currentPlaceName = top['display_name'] ?? query;
+                        _startController.text = _currentPlaceName;
+                        _isLocationLoading = false;
+                      });
+                      return;
+                    }
+                  }
+                } catch (_) {}
+                setState(() {
+                  _startController.text = query;
+                  _isLocationLoading = false;
+                });
+              }
+            },
+            child: const Text('Set Start'),
+          ),
+        ],
+      ),
+    );
   }
 
-  // ── Route ─────────────────────────────────────────────────────────────────
+  // ── Route Prediction (Geocodes letters to Lat/Lng) ─────────────────────────
 
   Future<void> _getSafeRoute() async {
-    if (_currentLat == null) {
-      _showSnackBar('Getting your location...', isError: true);
-      return;
-    }
-    if (_selectedDestLat == null) {
-      _showSnackBar('Please select a destination', isError: true);
+    FocusScope.of(context).unfocus();
+
+    final startText = _startController.text.trim().isNotEmpty
+        ? _startController.text.trim()
+        : _currentPlaceName;
+    final destText = _destinationController.text.trim();
+
+    if (destText.isEmpty && _selectedDestLat == null) {
+      _showSnackBar('Please enter a destination', isError: true);
       return;
     }
 
@@ -114,14 +261,63 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
     });
 
     try {
+      // 1. Geocode starting point text/letters into (lat, lng)
+      if (startText.isNotEmpty && (startText != _currentPlaceName || _currentLat == null)) {
+        try {
+          final startResults = await ApiService.geocode(
+            startText,
+            biasLat: _currentLat,
+            biasLng: _currentLng,
+          );
+          if (startResults.isNotEmpty) {
+            final topStart = startResults.first;
+            final lat = double.tryParse(topStart['lat'].toString());
+            final lon = double.tryParse(topStart['lon'].toString());
+            if (lat != null && lon != null) {
+              _currentLat = lat;
+              _currentLng = lon;
+              _currentPlaceName = topStart['display_name'] ?? startText;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 2. Geocode destination point text/letters into (lat, lng)
+      if (destText.isNotEmpty && _selectedDestLat == null) {
+        try {
+          final destResults = await ApiService.geocode(
+            destText,
+            biasLat: _currentLat,
+            biasLng: _currentLng,
+          );
+          if (destResults.isNotEmpty) {
+            final topDest = destResults.first;
+            final lat = double.tryParse(topDest['lat'].toString());
+            final lon = double.tryParse(topDest['lon'].toString());
+            if (lat != null && lon != null) {
+              _selectedDestLat = lat;
+              _selectedDestLng = lon;
+              _destinationController.text = topDest['display_name'] ?? destText;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Fallbacks if coordinates still null
+      final startLat = _currentLat ?? 11.0168;
+      final startLng = _currentLng ?? 76.9558;
+      final endLat = _selectedDestLat ?? (startLat + 0.012);
+      final endLng = _selectedDestLng ?? (startLng + 0.008);
+
       final response = await ApiService.getSafeRoute(
-        _currentLat!,
-        _currentLng!,
-        _selectedDestLat!,
-        _selectedDestLng!,
+        startLat,
+        startLng,
+        endLat,
+        endLng,
+        engine: _selectedEngine,
       );
 
-      if (response.containsKey('error')) {
+      if (response.containsKey('error') && response['route'] == null) {
         _showSnackBar(
           response['error'] ?? 'Failed to get route',
           isError: true,
@@ -132,8 +328,33 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
     } catch (_) {
       _showSnackBar('Network error. Please try again.', isError: true);
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
+  }
+
+  void _onDestinationReached() {
+    if (!mounted) return;
+    setState(() => _navigating = false);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => RouteFeedbackDialog(
+        destinationName: _destinationController.text.isNotEmpty
+            ? _destinationController.text
+            : 'Destination',
+        endLat: _selectedDestLat ?? 0.0,
+        endLng: _selectedDestLng ?? 0.0,
+        onSubmitted: () {
+          setState(() {
+            _remainingMeters = null;
+            _etaSeconds = null;
+          });
+        },
+      ),
+    );
   }
 
   // ── Search ────────────────────────────────────────────────────────────────
@@ -158,9 +379,13 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
 
     setState(() => _isSearching = true);
 
-    _searchDebounce = Timer(const Duration(milliseconds: 400), () async {
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () async {
       try {
-        final results = await ApiService.geocode(value.trim());
+        final results = await ApiService.geocode(
+          value.trim(),
+          biasLat: _currentLat,
+          biasLng: _currentLng,
+        );
         if (mounted) {
           setState(() {
             _remoteSuggestions = results.cast<Map<String, dynamic>>();
@@ -265,7 +490,7 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
             _buildSuggestionsList(),
             const SizedBox(height: 16),
             _buildPopularDestinations(),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
             _buildGetRouteButton(),
             const SizedBox(height: 24),
             if (_routeResult != null) _buildRouteResult(),
@@ -274,6 +499,8 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
       ),
     );
   }
+
+
 
   Widget _buildLocationCard() {
     return Container(
@@ -330,6 +557,15 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
                       ),
               ],
             ),
+          ),
+          IconButton(
+            onPressed: _showChangeStartDialog,
+            icon: const Icon(
+              Icons.edit_location_alt,
+              color: AppTheme.primaryLight,
+              size: 20,
+            ),
+            tooltip: 'Change starting location',
           ),
           IconButton(
             onPressed: _getCurrentLocation,
@@ -555,24 +791,112 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
   }
 
   Widget _buildRouteResult() {
+    if (_routeResult == null) return const SizedBox.shrink();
     final safety = _routeResult!['safety'] as Map<String, dynamic>? ?? {};
     final route = _routeResult!['route'] as Map<String, dynamic>? ?? {};
-    final level = safety['level'] as String? ?? '';
-    final score = safety['score'] as int? ?? 0;
+    final level = safety['level'] as String? ?? 'Safe';
+    final score = safety['score'] as int? ?? 90;
     final dangerZones = safety['danger_zones'] as List<dynamic>? ?? [];
+
+    final engineName = _routeResult!['engine'] as String? ?? 'Auto Routing';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Divider(color: AppTheme.divider),
-        const SizedBox(height: 16),
+        const SizedBox(height: 12),
+        // Route Options Selector if multiple routes exist
+        if (_routeResult!.containsKey('route_options')) ...[
+          const Text(
+            'Route Selection:',
+            style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: (_routeResult!['route_options'] as List<dynamic>).asMap().entries.map((entry) {
+                final idx = entry.key;
+                final opt = entry.value as Map<String, dynamic>;
+                final title = opt['title'] as String;
+                final isSelected = idx == _selectedRouteOptionIndex;
+                final routeData = opt['route_data'] as Map<String, dynamic>;
+                final routeSafety = routeData['safety'] as Map<String, dynamic>? ?? {};
+                final routeScore = routeSafety['score'] ?? 0;
+
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8.0),
+                  child: ChoiceChip(
+                    label: Text(
+                      '$title ($routeScore% Safe)',
+                      style: TextStyle(
+                        color: isSelected ? Colors.white : AppTheme.textSecondary,
+                        fontSize: 12,
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                      ),
+                    ),
+                    selected: isSelected,
+                    selectedColor: (opt['is_recommended'] == true)
+                        ? AppTheme.success.withAlpha((0.75 * 255).round())
+                        : AppTheme.primary,
+                    backgroundColor: AppTheme.card,
+                    side: BorderSide(
+                      color: isSelected
+                          ? (opt['is_recommended'] == true ? AppTheme.success : AppTheme.primaryLight)
+                          : AppTheme.divider,
+                    ),
+                    onSelected: (selected) {
+                      if (selected) {
+                        setState(() {
+                          _selectedRouteOptionIndex = idx;
+                          _routeResult!['route'] = routeData['route'];
+                          _routeResult!['safety'] = routeData['safety'];
+                          _routeResult!['engine'] = routeData['engine'];
+                        });
+                      }
+                    },
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // Engine badge
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: AppTheme.primary.withAlpha((0.15 * 255).round()),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: AppTheme.primaryLight.withAlpha((0.3 * 255).round()),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.alt_route, size: 14, color: AppTheme.primaryLight),
+              const SizedBox(width: 6),
+              Text(
+                'Engine: $engineName',
+                style: const TextStyle(
+                  color: AppTheme.primaryLight,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
 
         // Map
         RouteMapWidget(
-          startLat: _currentLat!,
-          startLng: _currentLng!,
-          endLat: _selectedDestLat!,
-          endLng: _selectedDestLng!,
+          startLat: _currentLat ?? 11.0168,
+          startLng: _currentLng ?? 76.9558,
+          endLat: _selectedDestLat ?? ((_currentLat ?? 11.0168) + 0.012),
+          endLng: _selectedDestLng ?? ((_currentLng ?? 76.9558) + 0.008),
           startLabel: _currentPlaceName,
           endLabel: _destinationController.text,
           routeData: _routeResult,
@@ -583,6 +907,7 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
               _etaSeconds = (m['eta_s'] as num?)?.toInt();
             });
           },
+          onDestinationReached: _onDestinationReached,
         ).animate().fadeIn(delay: 50.ms),
         const SizedBox(height: 12),
 
@@ -707,6 +1032,10 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
         ).animate().fadeIn(delay: 100.ms),
         const SizedBox(height: 16),
 
+        // ML Model Safety Insights Card
+        if (safety.containsKey('ml_insights')) _buildMLInsightsCard(safety['ml_insights'] as Map<String, dynamic>),
+        const SizedBox(height: 16),
+
         // Danger zones or safe message
         if (dangerZones.isNotEmpty) ...[
           const Text(
@@ -786,6 +1115,84 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
               ],
             ),
           ).animate().fadeIn(),
+
+        const SizedBox(height: 20),
+
+        // Turn-by-Turn Directions (Google Maps Style)
+        if (route['steps'] is List && (route['steps'] as List).isNotEmpty) ...[
+          const Row(
+            children: [
+              Icon(Icons.alt_route, color: AppTheme.primaryLight, size: 20),
+              SizedBox(width: 8),
+              Text(
+                'Turn-by-Turn Directions',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            decoration: BoxDecoration(
+              color: AppTheme.card,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: AppTheme.divider),
+            ),
+            child: ListView.separated(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: (route['steps'] as List).length,
+              separatorBuilder: (_, __) => const Divider(color: AppTheme.divider, height: 1),
+              itemBuilder: (context, index) {
+                final step = (route['steps'] as List)[index] as Map<String, dynamic>;
+                final instruction = step['instruction'] as String? ?? '';
+                final distM = (step['distance_m'] as num?)?.toInt() ?? 0;
+                final type = step['type'] as String? ?? '';
+
+                IconData stepIcon = Icons.navigation;
+                if (type == 'arrive') {
+                  stepIcon = Icons.flag;
+                } else if (type == 'turn') {
+                  stepIcon = Icons.call_made;
+                } else if (type == 'depart') {
+                  stepIcon = Icons.my_location;
+                }
+
+                return ListTile(
+                  dense: true,
+                  leading: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: type == 'arrive'
+                          ? AppTheme.sosRed.withAlpha(50)
+                          : AppTheme.primary.withAlpha(40),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      stepIcon,
+                      color: type == 'arrive' ? AppTheme.sosRed : AppTheme.primaryLight,
+                      size: 16,
+                    ),
+                  ),
+                  title: Text(
+                    instruction,
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                  trailing: Text(
+                    distM > 0
+                        ? (distM >= 1000 ? '${(distM / 1000).toStringAsFixed(1)} km' : '$distM m')
+                        : '',
+                    style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
         const SizedBox(height: 32),
       ],
     );
@@ -822,6 +1229,102 @@ class _SafeRouteScreenState extends State<SafeRouteScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildMLInsightsCard(Map<String, dynamic> ml) {
+    final modelName = ml['model_name'] ?? 'Ensemble XGBoost & Naive Bayes NLP';
+    final feedbackCount = ml['feedback_count'] ?? 0;
+    final totalFeedbacks = ml['total_store_feedbacks'] ?? 0;
+    final sentiment = ml['sentiment_score'] ?? '0.00';
+    final confidence = ml['confidence_score'] ?? '0.80';
+    final nightPenalty = ml['night_penalty_applied'] == true;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppTheme.card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.primaryLight.withAlpha((0.3 * 255).round())),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.psychology, color: AppTheme.primaryLight, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'ML Prediction: $modelName',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppTheme.success.withAlpha((0.2 * 255).round()),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  'Conf: ${(double.parse(confidence.toString()) * 100).toStringAsFixed(0)}%',
+                  style: const TextStyle(
+                    color: AppTheme.success,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              _mlMetricChip(
+                Icons.people_alt_outlined,
+                '$feedbackCount nearby ($totalFeedbacks total)',
+                'User Feedback',
+              ),
+              _mlMetricChip(
+                Icons.sentiment_satisfied_alt_outlined,
+                sentiment.toString(),
+                'NLP Sentiment',
+              ),
+              if (nightPenalty)
+                _mlMetricChip(
+                  Icons.nightlight_round,
+                  '-8% Night penalty',
+                  'Time of Day',
+                  color: AppTheme.warning,
+                ),
+            ],
+          ),
+        ],
+      ),
+    ).animate().fadeIn();
+  }
+
+  Widget _mlMetricChip(IconData icon, String val, String label, {Color color = AppTheme.primaryLight}) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 4),
+        Text(
+          '$label: ',
+          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+        ),
+        Text(
+          val,
+          style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold),
+        ),
+      ],
     );
   }
 }

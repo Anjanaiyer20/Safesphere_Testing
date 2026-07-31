@@ -66,5 +66,17 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>tel</string>
+		<string>sms</string>
+		<string>mailto</string>
+		<string>https</string>
+		<string>http</string>
+	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>SafeSphere needs access to your location to provide real-time safe route predictions and SOS emergency alerts.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>SafeSphere needs location access to alert your emergency contacts during an active SOS trigger.</string>
 </dict>
 </plist>

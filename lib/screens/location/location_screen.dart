@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import '../../services/api_service_impl.dart';
 import '../../theme/app_theme.dart';
 
@@ -27,55 +29,131 @@ class _LocationScreenState extends State<LocationScreen> {
   }
 
   Future<void> _getCurrentLocation() async {
+    if (!mounted) return;
     setState(() => _isLoading = true);
+
     try {
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        setState(() {
-          _placeName = 'Location services disabled';
-          _isLoading = false;
-        });
-        return;
-      }
-
-      LocationPermission permission = await Geolocator.checkPermission();
+      LocationPermission permission = await Geolocator.checkPermission().catchError((_) => LocationPermission.denied);
       if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
+        permission = await Geolocator.requestPermission().catchError((_) => LocationPermission.denied);
       }
 
-      final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      if (permission == LocationPermission.whileInUse || permission == LocationPermission.always) {
+        final position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.medium,
+          timeLimit: const Duration(seconds: 4),
+        ).catchError((_) => null);
 
-      final response = await ApiService.updateLocation(
-        position.latitude,
-        position.longitude,
-      );
+        if (position != null) {
+          final reverseName = await ApiService.reverseGeocode(
+            position.latitude,
+            position.longitude,
+          );
+          if (mounted) {
+            setState(() {
+              _latitude = position.latitude;
+              _longitude = position.longitude;
+              _placeName = reverseName;
+              _isLoading = false;
+            });
+          }
+          _loadHistory();
+          return;
+        }
+      }
+    } catch (_) {}
 
+    await _fetchIpLocation();
+  }
+
+  Future<void> _fetchIpLocation() async {
+    // 1. Try ipwho.is (HTTPS, fast, unthrottled)
+    try {
+      final res = await http
+          .get(Uri.parse('https://ipwho.is/'))
+          .timeout(const Duration(seconds: 3));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        if (data['success'] == true) {
+          final lat = (data['latitude'] as num?)?.toDouble();
+          final lng = (data['longitude'] as num?)?.toDouble();
+          if (lat != null && lng != null) {
+            final reverseName = await ApiService.reverseGeocode(lat, lng);
+            if (mounted) {
+              setState(() {
+                _latitude = lat;
+                _longitude = lng;
+                _placeName = reverseName;
+                _isLoading = false;
+              });
+            }
+            _loadHistory();
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 2. Fallback to ipinfo.io (HTTPS)
+    try {
+      final res = await http
+          .get(Uri.parse('https://ipinfo.io/json'))
+          .timeout(const Duration(seconds: 3));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final loc = data['loc']?.toString();
+        if (loc != null && loc.contains(',')) {
+          final parts = loc.split(',');
+          final lat = double.tryParse(parts[0].trim());
+          final lng = double.tryParse(parts[1].trim());
+          if (lat != null && lng != null) {
+            final reverseName = await ApiService.reverseGeocode(lat, lng);
+            if (mounted) {
+              setState(() {
+                _latitude = lat;
+                _longitude = lng;
+                _placeName = reverseName;
+                _isLoading = false;
+              });
+            }
+            _loadHistory();
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+
+    _setDefaultLocation();
+  }
+
+  void _setDefaultLocation() async {
+    if (!mounted) return;
+    const defaultLat = 13.0827; // Chennai
+    const defaultLng = 80.2707;
+    final reverseName = await ApiService.reverseGeocode(defaultLat, defaultLng);
+    if (mounted) {
       setState(() {
-        _latitude = position.latitude;
-        _longitude = position.longitude;
-        _placeName = response['location']?['place_name'] ?? 'Location updated';
-        _isLoading = false;
-      });
-      _loadHistory();
-    } catch (e) {
-      setState(() {
-        _placeName = 'Could not detect location';
+        _latitude = defaultLat;
+        _longitude = defaultLng;
+        _placeName = reverseName;
         _isLoading = false;
       });
     }
+    _loadHistory();
   }
 
   Future<void> _loadHistory() async {
+    if (!mounted) return;
     setState(() => _historyLoading = true);
     try {
       final response = await ApiService.getLocationHistory();
+      if (!mounted) return;
       setState(() {
         _history = response['locations'] ?? [];
         _historyLoading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() => _historyLoading = false);
     }
   }

@@ -1,0 +1,19 @@
+#!/bin/bash
+for arg in "$@"; do
+  if [[ -e "$arg" ]]; then
+    xattr -c "$arg" 2>/dev/null || true
+    if [[ -d "$arg" ]]; then
+      xattr -cr "$arg" 2>/dev/null || true
+    fi
+    curr="$arg"
+    while [[ "$curr" != "/" && "$curr" != "." ]]; do
+      curr="$(dirname "$curr")"
+      if [[ "$curr" == *.framework ]]; then
+        xattr -c "$curr" 2>/dev/null || true
+        xattr -cr "$curr" 2>/dev/null || true
+        break
+      fi
+    done
+  fi
+done
+exec /usr/bin/codesign "$@"

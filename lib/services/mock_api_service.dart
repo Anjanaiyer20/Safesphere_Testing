@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'api_service_impl.dart' show RoutingEngine;
 
 /// Mock API Service for development/testing when backend is unavailable.
 /// Toggle USE_MOCK_API in ApiService to enable.
@@ -234,10 +235,12 @@ class MockApiService {
     double startLat,
     double startLng,
     double endLat,
-    double endLng,
-  ) async {
+    double endLng, {
+    RoutingEngine engine = RoutingEngine.auto,
+  }) async {
     await Future.delayed(_delay);
     return {
+      'engine': 'Mock Engine',
       'safety': {
         'level': 'Safe',
         'score': 85,
