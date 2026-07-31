@@ -1,2 +1,7 @@
 #include "../../Flutter/Flutter-Debug.xcconfig"
+#include "../../Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
 #include "Warnings.xcconfig"
+
+CODE_SIGN_IDENTITY = -
+CODE_SIGNING_REQUIRED = NO
+CODE_SIGN_ENTITLEMENTS = Runner/DebugProfile.entitlements
